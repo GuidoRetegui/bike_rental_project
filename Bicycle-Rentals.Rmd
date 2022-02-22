@@ -1,0 +1,752 @@
+---
+title: "Bicycle Rents (Extra Trees Algorithm)"
+author: "Guido Retegui"
+date: "1/2/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+Many American cities have communal bike sharing stations where you can rent bicycles by the hour or day. Washington, D.C. is one of these cities. The District collects detailed data on the number of bicycles people rent by the hour and day.
+
+We compiled a dataset like the one produced by Hadi Fanaee-T at the University of Porto which we'll be working with in this project. 
+
+First we are going to install the required packages:
+
+```{r echo=TRUE, cache=FALSE, results=FALSE, warning=FALSE, comment=FALSE, warning=FALSE}
+
+#Downloading and installing packages, this a could take a few minutes
+
+if(!require(caret)) install.packages("caret",repos ="http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse",repos ="http://cran.us.r-project.org")
+if(!require(corrplot)) install.packages("corrplot",repos ="http://cran.us.r-project.org")
+install.packages("rJava", repos = "https://cran.rstudio.com")
+install.packages("extraTrees",repos ="https://cran.r-project.org/")
+
+
+# Please, make sure you have the right version of Java (32 or 64 bit) to match architectures with R, 
+# otherwise the console will show an error
+
+library(rJava)
+
+# This instruction solves memory problems for "extraTrees" package
+
+options( java.parameters = "-Xmx4g" ) 
+library(extraTrees)
+
+library(lubridate)
+
+library(creditmodel)
+
+# Create "temp" file and download database
+
+temp <- tempfile()
+download.file("https://raw.githubusercontent.com/GuidoRetegui/bike_rental_hour_saegus/master/bike_rental_hour_saegus.csv", temp)
+
+brhs <- read.csv(temp)
+```
+
+
+## Quick Review
+
+Let's analyse our database. We can see a quick review of it: 
+
+
+```{r warning=FALSE, paged.print=FALSE}
+
+str(brhs)
+
+```
+
+The file contains 62608 rows, with each row representing the number of bike rentals for a single hour of a single day.
+
+
+With this function, we can see the first entries of the dataset:
+
+```{r warning=FALSE, paged.print=FALSE}
+
+head(brhs)
+
+```
+
+
+## Main Variables
+
+In this section, we'll see a description of the variables contained in the dataset with their respective name and type.
+
+* dteday (character) - The date of the rentals
+* hr (integer) - rental's Hour
+* season (integer) - The season in which the rentals occurred
+* holiday (integer) - Whether or not the day was a holiday
+* fulldate (character) - date and time (datetime format)
+* workingday (character) - Whether or not the day was a working day
+* weathersit (character) - The weather
+* temp (character) - The temperature (°C)
+* atemp (character) - The adjusted temperature (°C)
+* hum (character) - The humidity (%)
+* windspeed (character) - The wind speed (km/h)
+* pressure (character) - Pressure (mb)
+* dewpoint (character) - Temperature to which air must be cooled to become saturated with water vapor (in celsius).
+* fog (character) - Presence of fog (true/false).
+* wea_desc (character) - Description of the weather.
+* casual (integer) - The number of casual riders (people who hadn't previously signed up with the bike sharing program)
+* registered (integer) - The number of registered riders (people who had already signed up)
+* cnt (integer) - The total number of bike rentals (casual + registered)
+
+
+## Data Cleaning
+
+
+Last day contains many missing values. We can remove them because one day in five years is insignificant. This loop fixes the problem:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+#Remove last day from the dataset
+
+for (i in 52249:52272){ 
+  brhs <- brhs[-c(52249),]
+}
+
+```
+
+
+Secondly, to optimize the analysis, we are going to convert some variables to numeric. For example, we know how "temp" variable is measured, the important data takes place exclusively in the number. To remove useless parts of these characters and change their types into numeric, we use:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+#delete "Â°C" from the variable 'temp'
+brhs$temp <- lapply(brhs$temp, gsub, pattern='Â°C', replacement = '') 
+#change variable's type to numeric
+brhs$temp <- as.numeric(brhs$temp) 
+
+#delete "Â°C" from the variable 'atemp'
+brhs$atemp <- lapply(brhs$atemp, gsub, pattern='Â°C', replacement = '')
+#change variable's type to numeric
+brhs$atemp <- as.numeric(brhs$atemp) 
+
+#delete "Â°C" from the variable 'dewpoint'
+brhs$dewpoint <- lapply(brhs$dewpoint, gsub, pattern='Â°C', replacement = '') 
+#change variable's type to numeric
+brhs$dewpoint <- as.numeric(brhs$dewpoint)
+
+#delete "%" from the variable 'hum'
+brhs$hum <- lapply(brhs$hum, gsub, pattern='%', replacement = '') 
+#change variable's type to numeric
+brhs$hum <- as.numeric(brhs$hum) 
+
+#delete " km/h" from the variable 'windspeed'
+brhs$windspeed <- lapply(brhs$windspeed, gsub, pattern=' km/h', replacement = '') 
+#change variable's type to numeric
+brhs$windspeed <- as.numeric(brhs$windspeed)
+
+#delete " mb" from the variable 'pressure'
+brhs$pressure <- lapply(brhs$pressure, gsub, pattern='mb', replacement = '')
+#change variable's type to numeric
+brhs$pressure <- as.numeric(brhs$pressure) 
+```
+
+
+We can see "fog" variable is a character vector. With this instruction we change the values to 1 in case of fog, and to 0 if it is not. After that, we change the variable's type to numeric to complete the cleaning. 
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+# Change "fog" to a dummy variable
+
+for (i in 1:52248) {
+  if (brhs$fog[i] == "true" & !is.na(brhs$fog[i])) {
+    brhs$fog[i] = 1
+  }
+  else{
+    brhs$fog[i] = 0
+  }
+}
+
+#change variable's type to numeric
+
+brhs$fog <- as.numeric(brhs$fog)
+
+```
+
+Taking the "dteday" variable, we create the "weekdayname" and the "weekdaynum" columns with the "strftime" function. The second one will be important to make the evaluation, so we change its variable type to numeric as well. "Weekdaynum" assigns the weekdays as decimal numbers (1 is for Monday).
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+# Create the "weekdayname" column
+
+brhs <- mutate(brhs, weekdayname = strftime(brhs$dteday, "%A"))
+
+# Create the "weekdaynum" column. Weekdaynum as a decimal number (1-7, Monday is 1).
+
+brhs <- mutate(brhs, weekdaynum = strftime(brhs$dteday, "%u"))
+
+#change variable's type to numeric
+
+brhs$weekdaynum <- as.numeric(brhs$weekdaynum)
+
+```
+
+Taking the "cnt" variable, we convert it to create the values in their logarithms:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Create the column "lcnt" with the cnt's logarithm
+
+brhs <- mutate(brhs, lcnt = log(brhs$cnt)) 
+
+```
+
+With the "year" function we can take that value from the date and extract it to create a new column with "mutate":
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Create the column "year"
+
+brhs <- mutate(brhs, year = year(brhs$dteday)) 
+
+```
+
+The last modification of the dataset that we are going to make is to create the column "workingday_dummy" and assign them the value of 0. With the for loop we check if the value containing in the column "workingday" is "True" to assign this information to our new column.
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Create the column "workingday_dummy"
+
+brhs <- mutate(brhs, workingday_dummy = 0) 
+
+#Assigning "Workingday_dummy" column the value "1" when it is a workingday.
+
+for (i in 1:52248) {
+  if (brhs$workingday[i] == "True" & !is.na(brhs$workingday[i])) {
+    brhs$workingday_dummy[i] = 1
+  }
+}
+
+```
+
+We can check these changes we implemented with "head" instruction again:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Create the column "year"
+
+head(brhs)
+
+```
+
+
+Once we have a cleaner data, we can proceed to the analysis itself.
+
+# Data Analysis
+
+## Summary of bicycle rents
+
+With "group_by" we can make the analysis by day. The following code shows the sum of bicycles rented (and its mean per hour) by day  
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Summary of total rents per day and mean per hour
+
+brhs %>% group_by(dteday) %>% summarize (rents = sum(cnt), mean = mean(cnt))
+
+```
+
+We can also differentiate by how many users that rented the bicycles were registered and how many of them were not.
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Accumulated rents per day, differentiated by "registered" and "casual" variables
+
+sum_day_cnt <- brhs %>% group_by(dteday) %>% 
+  summarize(day_reg = sum(registered), 
+            day_casual = sum(casual), 
+            day_count = sum(cnt))
+sum_day_cnt
+
+```
+
+The mean per day of bicycle rents by casual users and registered users are:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+# Mean of rents per day, differentiated by "registered" and "casual" variables
+
+sum_day_cnt %>% summarize(reg_p_day = mean(day_reg), cas_p_day = mean(day_casual), 
+                          cnt_p_day = mean(day_count))
+
+```
+
+The total rents of the entire dataset, differentiated by casual and registered users:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+# Total rents, differentiated by "registered" and "casual" variables
+
+brhs %>% summarize(registered = sum(registered), casual = sum(casual), cnt= sum(cnt))
+
+```
+
+
+## Summary of main variables
+
+We can show the mean per hour of temp, atemp, dewpoint, hum, windspeed, pressure.
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+# Summary of principal variables
+ 
+brhs %>% summarize (temp = mean(temp), atemp = mean(atemp)) 
+brhs %>% summarize (dewpoint = mean(dewpoint), hum = mean(hum))
+brhs %>% summarize (windspeed = mean(windspeed), pressure = mean(pressure))
+
+```
+
+How many times "fog" were registered, and the probability of occurence:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Hours with fog vs hours without fog, and its probability
+
+brhs %>% summarize(fog = sum(brhs$fog==1), no_fog = sum(brhs$fog==0), 
+                   Pr_fog = fog/(fog+no_fog), Pr_no_fog = no_fog/(fog+no_fog)) 
+
+```
+
+
+## Graphs and more analysis
+  
+### cnt by hour
+
+Using the "cnt" variable, we can show a plot taking its mean by hour:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Rents by hour.
+
+brhs %>% group_by(hr) %>% 
+  summarize(cnt=mean(cnt)) %>% 
+  ggplot(aes(hr, cnt)) + 
+  geom_point () + 
+  geom_line()
+
+```
+
+We can easily observe how the most popular hours to rent are between 8 and 9 am, and between 5 and 6 pm. We can even improve the graph by adding the "workingday" variable:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Rents by hour, differentiated by workingday
+
+brhs %>% group_by(hr, workingday) %>% 
+  summarize(cnt=mean(cnt), .groups = 'drop') %>% 
+  ggplot(aes(hr, cnt, col = workingday, group = workingday)) + 
+  geom_point () + 
+  geom_line()
+
+
+```
+
+The graph shows how on weekends these hours become less relevant. The last graph will show the differentiation by day:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Rents by hour, differentiated by day
+
+brhs %>% group_by(hr, weekdayname) %>% 
+  summarize(cnt=mean(cnt), .groups = 'drop') %>% 
+  ggplot(aes(hr, cnt, col = weekdayname)) + 
+  geom_point () + 
+  geom_line()
+
+```
+
+
+
+
+### cnt and lcnt Distributions
+
+These two following graphs show the distribution of "cnt" and "lcnt" variables respectively. We can see an approximately normal distribution when transform "cnt" to a logarithmic form.
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# cnt histogram
+
+brhs %>% ggplot(aes(cnt)) + geom_histogram(binwidth = 50, color="red") 
+
+```
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Logarithm of cnt histogram
+
+brhs %>% ggplot(aes(lcnt)) + geom_histogram(binwidth = 0.175, color="blue") 
+
+```
+
+### Correlation between main variables
+
+With these instructions we are going to select the main variables, make the correlations between them and show with the corrplot package, the results we obtained.
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+#Select variables to analyse
+
+M <- brhs %>% select(cnt, temp, atemp, 
+                     dewpoint, hum, windspeed, pressure, casual, registered)
+
+# Make the correlation of the selected variables
+
+A <- cor(M)
+
+# Show the correlation graph
+
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(A, method="color", col=col(200),  
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=90, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, insig = "blank", 
+)
+
+```
+
+
+## Model Performance Evaluation
+
+### Root Mean Squared Logarithmic Error - RMSLE
+
+The evaluation will consist in comparing the predicted value with the actual outcome. To compare this relationship, we need a loss function: The Root Mean Squared Logarithmic Error. To make an understandable example, when the predicted rents are consistently selected, the error is equal to zero and the algorithm is perfect. The RMSLE is defined by the formula:  
+
+$$RMSLE=\sqrt{\frac{1}{N}\sum_{u,i}(Log(\hat{y}_{i}+1)-Log(y_{i}+1))^2}$$
+Where $N$ is the number of observations; $y_{i}$ is the observation $i$; $\hat{y}_{i}$ is the estimated value of the observation $i$.
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+RMSLE <- function(true, pred){
+  sqrt(mean((log(pred+1) - log(true+1))^2))
+}
+
+```
+
+### Extra Trees
+
+
+"Extra Trees" is an ensemble machine learning algorithm that combines the predictions from many decision trees. It is related to the widely used "random forest" algorithm, but it can often achieve as-good or better performance, although it uses a simpler algorithm to construct the decision trees used as members of the ensemble.
+
+The Extra Trees works by creating a large number of decision trees from the training dataset. Predictions are made by averaging the prediction of the decision trees in the case of regression or using majority voting in the case of classification.
+
+
+# Results
+
+In this section we make the partition of the dataset, and evaluate how the model works with different numeric vectors. Our goal is to minimize the Root Mean Squared Logarithmic Error. But first we will take the simplest model to evaluate it and compare with the other ones.
+
+Before starting, we copy the values of "cnt" in "Y", and then we split (70% for train set and the rest for test set) with the next instruction:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Copy CNT values in "Y" and split to train (0.7) and test (0.3)
+
+Y <- as.data.frame(brhs$cnt)
+
+Y <- train_test_split(Y, prop = 0.7, split_type = "Random")
+
+```
+
+## The simplest model 
+
+The first model simply uses the average "cnt" from the train set:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+mu <- mean(Y$train)
+mu
+
+```
+
+And its RMSLE give us a value of: 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+RMSLE_SM <- RMSLE(Y$test, mu)
+RMSLE_SM
+
+```
+
+From now on we are going to use the Extra Trees algorithm, let's see the difference:
+
+## Model 2 (Extra Trees)
+
+We assign the data base to the variable "X":
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+X <- brhs # Assign database to X
+
+```
+
+Then we delete some non-numeric columns, and some numeric columns like "weekdaynum" and "workingday_dummy": 
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#Delete some non-numeric columns of X
+
+X <- select(X, -c(dteday, cnt, lcnt, fulldate, 
+                  weathersit, wea_desc, workingday, 
+                  weekdayname, weekdaynum, workingday_dummy)) 
+
+```
+
+Next step is to make the partition of the assigned datasets, 70% will correspond to train set and the rest to the test set. 
+
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+#Split to train (0.7) and test (0.3)
+
+X <- train_test_split(X, prop = 0.7, split_type = "Random")
+
+```
+
+
+Here we use the ExtraTrees function, that we describe before:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Extra Trees function
+
+ex <- extraTrees(X$train,Y$train)
+
+y_predict <- predict(ex, X$test)
+
+```
+
+We calculate and prepare the variables needed to show the residuals graph:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#Calculate the residuals
+
+residuals <- Y$test-y_predict
+
+# Calculate the correlation between Y$test and residuals
+
+r <- cor(Y$test, residuals)
+
+# Calculate standard deviation of Y$test
+
+s <- sd(Y$test)
+
+# Calculate standard deviation of residuals
+
+u <- sd(residuals)
+
+```
+
+Here is the plot that shows the residuals:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#Graph of Number of observations with residuals
+
+ggplot(data = NULL, aes(Y$test, residuals)) + 
+  geom_point (alpha = 0.5) + 
+  geom_abline(intercept = mean(residuals)-((r*u/s)*mean(Y$test)), 
+              slope = r*u/s, color = "green")
+
+
+```
+
+Our first Extra Trees' RMSLE give us a value of: 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#RMSLE for Model 2
+
+RMSLE2 <- RMSLE(Y$test, y_predict)
+RMSLE2
+
+```
+
+
+## Model 3 (Extra Trees)
+
+We are going to make the same process, but this time we'll select other variables to evaluate them. Let's keep "workingday_dummy" in our dataset:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+X <- brhs # Assign database to X
+
+#Delete the same non-numeric columns of X as the first model, 
+#except for "workingday_dummy"
+
+X <- select(X, -c(dteday, cnt, lcnt, 
+                  fulldate, weathersit, wea_desc, 
+                  weekdayname, weekdaynum, workingday))
+
+#Split to train (0.7) and test (0.3)
+
+X <- train_test_split(X, prop = 0.7, split_type = "Random")
+
+# Extra Trees function
+
+ex <- extraTrees(X$train,Y$train)
+
+y_predict <- predict(ex, X$test)
+
+```
+
+Now we are going to calculate the residuals again to make the plot for model 3. Note that the standard deviation of the "Y" test corresponds always to the same value because it does not depend on the new model.
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#Calculate the residuals
+
+residuals <- Y$test-y_predict
+
+# Calculate the correlation between Y$test and residuals
+
+r <- cor(Y$test, residuals)
+
+# Calculate standard deviation of Y$test
+
+s <- sd(Y$test)
+
+# Calculate standard deviation of residuals
+
+u <- sd(residuals)
+```
+
+Here is the plot of the model 3:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#Graph of Number of observations with residuals
+
+ggplot(data = NULL, aes(Y$test, residuals)) + 
+  geom_point (alpha = 0.5) + 
+  geom_abline(intercept = mean(residuals)-((r*u/s)*mean(Y$test)), 
+              slope = r*u/s, color = "green")
+
+
+```
+
+Our third RMSLE:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#RMSLE for Model 3
+
+RMSLE3 <- RMSLE(Y$test, y_predict)
+RMSLE3
+
+```
+
+## Model 4 (Extra Trees)
+
+To finalize, in our forth model we are going to keep in the dataset the "workingday_dummy" (as our last model) and the "weekdaynum" variables. Let's see what the result shows:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+X <- brhs # Assign database to X
+
+#Delete the same non-numeric columns of X as the first model, 
+#except for "workingday_dummy" and "weekdaynum"
+
+X <- select(X, -c(dteday, cnt, lcnt, 
+                  fulldate, weathersit, wea_desc, 
+                  weekdayname, workingday)) 
+
+
+#Split to train (0.7) and test (0.3)
+
+X <- train_test_split(X, prop = 0.7, split_type = "Random")
+
+# Extra Trees function
+
+ex <- extraTrees(X$train,Y$train)
+
+y_predict <- predict(ex, X$test)
+
+```
+
+Calculating the variables needed to make the graph:
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#Calculate the residuals
+
+residuals <- Y$test-y_predict
+
+# Calculate the correlation between Y$test and residuals
+
+r <- cor(Y$test, residuals)
+
+# Calculate standard deviation of Y$test
+
+s <- sd(Y$test)
+
+# Calculate standard deviation of residuals
+
+u <- sd(residuals)
+```
+
+Last plot:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#Graph of Number of observations with residuals
+
+ggplot(data = NULL, aes(Y$test, residuals)) + 
+  geom_point (alpha = 0.5) + 
+  geom_abline(intercept = mean(residuals)-((r*u/s)*mean(Y$test)), 
+              slope = r*u/s, color = "green")
+
+
+```
+
+And here it is our final RMSLE:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+
+#RMSLE for Model 4
+
+RMSLE4 <- RMSLE(Y$test, y_predict)
+RMSLE4
+
+```
+
+# Conclusion
+
+Once we have downloaded the database with all the respective required packages, we proceeded to clean the data deleting some rows, creating some vectors and changing the variable's type to numeric (to make them more analyzable). 
+In the Data Analysis section, we showed how the rents vary (depending on the hour and the day), what the mean of the main variables is, and the correlation between them. 
+After that, we explained how the algorithm "Extra Trees" works, and what formula we are going to use to evaluate its performance.
+Finally, in the Results Section, we evaluated the simplest model that gave us a RMSLE of 1.71.
+Once we implemented "Extra Trees" algorithm, we showed how the results improve to 0.0934, 0.0906 and 0.0668 respectively (an improvement of 96% from the first model).
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# Comparing Results
+
+tibble (Model_1 = RMSLE_SM, Model_2 = RMSLE2, Model_3 = RMSLE3, Model_4 = RMSLE4)
+
+```
